@@ -433,39 +433,38 @@ int main(int argc, char** argv) {
             verbose = true;
             break;
         default:
-            fprintf(stderr, "usage: ./httpserver <hostname:port> [-N num_threads] [-l log_file_name] [-v verbose]\n");
+            fprintf(stderr, "usage: ./httpserver <hostname:port> [-N num_threads] [-v verbose]\n");
             return EXIT_FAILURE;
         }
     }
     int index = optind;
     if (index >= argc || NUM_THREADS > 100 || NUM_THREADS <= 0) {
-        fprintf(stderr, "usage: ./httpserver <hostname:port> [-N num_threads] [-l log_file_name] [-v verbose]\n");
+        fprintf(stderr, "usage: ./httpserver <hostname:port> [-N num_threads] [-v verbose]\n");
         return EXIT_FAILURE;
     } else {
         for (index = optind; index < argc; index++) {
             char *token = strtok(argv[index], ":");
             if (token == NULL) {
-                fprintf(stderr, "usage: ./httpserver <hostname:port> [-N num_threads] [-l log_file_name] [-v verbose]\n");
+                fprintf(stderr, "usage: ./httpserver <hostname:port> [-N num_threads] [-v verbose]\n");
                 return EXIT_FAILURE;
             }
             SERVER_NAME_STRING = token;
             token = strtok(NULL, ":");
             if (token == NULL) {
-                fprintf(stderr, "usage: ./httpserver <hostname:port> [-N num_threads] [-l log_file_name] [-v verbose]\n");
+                fprintf(stderr, "usage: ./httpserver <hostname:port> [-N num_threads] [-v verbose]\n");
                 return EXIT_FAILURE;
             }
             PORT_NUMBER = token;
             int PORT_NUMBER_len = (int)strlen(PORT_NUMBER);
             for (int i = 0; i < PORT_NUMBER_len; i++) {
                 if (PORT_NUMBER[i] < '0' || PORT_NUMBER[i] > '9') {
-                    fprintf(stderr, "usage: ./httpserver <hostname:port> [-N num_threads] [-l log_file_name] [-v verbose]\n");
+                    fprintf(stderr, "usage: ./httpserver <hostname:port> [-N num_threads] [-v verbose]\n");
                     return EXIT_FAILURE;
                 }
             }
         }
     }
 
-    
     struct hostent *hent = gethostbyname(SERVER_NAME_STRING);
     if (hent == NULL) {
         fprintf(stderr, "Error: gethostbyname failed.\n");

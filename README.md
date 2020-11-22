@@ -7,7 +7,6 @@ To build `httpserver` just run `make` in the root of the directory.
 To run `httpserver` enter `./httpserver <hostname:port>` into the command line.<br />
 Optional flags are:<br />
 `[-N num_threads]` specifies the number of threads to run <br />
-`[-l log_file_name]` server will log status to file with name log_file_name<br />
 `[-v verbose]` server will print extra info about threads<br />
 
 ### Supported request methods
