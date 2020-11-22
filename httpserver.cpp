@@ -1,9 +1,11 @@
+#include "queue.h"
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <fcntl.h>
+#include <getopt.h>
 #include <unistd.h>
 #include <string.h>
 #include <stdlib.h>
@@ -12,14 +14,18 @@
 #include <errno.h>
 #include <err.h>
 #include <pthread.h>
+#include <semaphore.h>
 #include <limits.h>
+#include <netdb.h>
 #define BUFFER_SIZE 4096
 #define MAX_HEADER_SIZE 4096
 
-u_int64_t LOG_INDEX = 0;   // GLOBAL INDEX OF UP TO WHERE SPACE IS RESERVED ON THE LOG FILE
+sem_t sem; // sem for putting dispatcher to sleep
 pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER; // LOG FILE INDEX LOCK
-bool LOGGING = false;      // WETHER OR NOT USER WANTS TO LOG
+u_int64_t LOG_INDEX = 0;   // GLOBAL INDEX OF UP TO WHERE SPACE IS RESERVED ON THE LOG FILE
 char* LOG_FILE_NAME;       // NAME OF LOG FILE ARGUMENT GIVEN
+bool LOGGING = false;      // WETHER OR NOT USER WANTS TO LOG
+bool verbose = false;
 
 // stores all key data of each http request
 struct httpObject {
@@ -41,8 +47,8 @@ static void SET_ERR_CODE(struct httpObject* message, uint16_t code) {
     return;
 }
 
-// writes contents of file (filename) to client_sockd. (for a GET response)
-static void send_body(ssize_t client_sockd, struct httpObject* message) {
+// writes contents of file (filename) to cl. (for a GET response)
+static void send_body(ssize_t cl, struct httpObject* message) {
 
     int8_t fd = open(message->filename, O_RDONLY);
     ssize_t bytes_read = read(fd, message->buffer, BUFFER_SIZE);
@@ -52,7 +58,7 @@ static void send_body(ssize_t client_sockd, struct httpObject* message) {
 
     while(bytes_read > 0) {
 
-        ssize_t bytes_written = write(client_sockd, message->buffer, bytes_read);
+        ssize_t bytes_written = write(cl, message->buffer, bytes_read);
         if(bytes_written == -1) {
             SET_ERR_CODE(message, 500);
             break;
@@ -74,7 +80,7 @@ static void send_body(ssize_t client_sockd, struct httpObject* message) {
 static bool validFilename(char* s) {
     if(s[27] != '\0') return false;
     for(int i = 0; i < (int)(strlen(s)); i++) {
-        if(!((s[i] == '-')
+        if(!((s[i] == '-') || (s[i] == '.')
             || (s[i] == '_')
             || (s[i] >= '0' && s[i] <= '9')
             || (s[i] >= 'A' && s[i] <= 'Z')
@@ -149,7 +155,7 @@ static void process_file(struct httpObject* message) {
 }
 
 // **
-static void read_http_request(ssize_t client_sockd, struct httpObject* message) {
+static void read_http_request(ssize_t cl, struct httpObject* message) {
 
     //initialize httpObject fields
     initialize(message);
@@ -159,7 +165,7 @@ static void read_http_request(ssize_t client_sockd, struct httpObject* message) 
 
     // read stream until either found a double CRLF or read 4 KiB
     while(double_crlf_ptr == NULL && bytes < MAX_HEADER_SIZE) {
-        ssize_t bytes_read = read(client_sockd, (void*)(message->buffer + bytes), MAX_HEADER_SIZE - bytes);
+        ssize_t bytes_read = read(cl, (void*)(message->buffer + bytes), MAX_HEADER_SIZE - bytes);
         if(bytes_read < 0) {
             SET_ERR_CODE(message, 500);
             return;
@@ -207,7 +213,7 @@ static void read_http_request(ssize_t client_sockd, struct httpObject* message) 
 }
 
 // **
-static void process_request(ssize_t client_sockd, struct httpObject* message) {
+static void process_request(ssize_t cl, struct httpObject* message) {
 
     // error occured at some point previously, return and proceed to send response
     if(message->status_code != 0) {
@@ -264,8 +270,8 @@ static void process_request(ssize_t client_sockd, struct httpObject* message) {
         // since everything seems good so far, send an 100 continue (if expected)
         char* ex_continue_ptr = strstr(message->buffer, "Expect: 100-continue");
         if(ex_continue_ptr != NULL) {
-            char* continue_resp = "HTTP/1.1 100 Continue\r\n\r\n";
-            if( write(client_sockd, continue_resp, strlen(continue_resp)) == -1 ) {
+            char continue_resp[50] = "HTTP/1.1 100 Continue\r\n\r\n";
+            if( write(cl, continue_resp, strlen(continue_resp)) == -1 ) {
                 SET_ERR_CODE(message, 500);
                 return;
             }
@@ -304,7 +310,7 @@ static void process_request(ssize_t client_sockd, struct httpObject* message) {
             bytes_needed -= write_count;
         }
         while(bytes_needed > 0) {
-            ssize_t read_count = read(client_sockd, message->buffer, BUFFER_SIZE);
+            ssize_t read_count = read(cl, message->buffer, BUFFER_SIZE);
             if(read_count == -1) {
                 SET_ERR_CODE(message, 500);
                 close(fd);
@@ -336,7 +342,7 @@ static void process_request(ssize_t client_sockd, struct httpObject* message) {
 }
 
 // **
-static void construct_http_response(ssize_t client_sockd, struct httpObject* message) {
+static void construct_http_response(ssize_t cl, struct httpObject* message) {
 
     char* status_message;
     switch (message->status_code) {
@@ -371,7 +377,7 @@ static void construct_http_response(ssize_t client_sockd, struct httpObject* mes
         content_len = message->content_length;
     }
     sprintf(message->buffer, "HTTP/1.1 %d %s\r\nContent-Length: %zu\r\n\r\n", message->status_code, status_message, content_len);
-    ssize_t bytes_written = write(client_sockd, message->buffer, strlen(message->buffer));
+    ssize_t bytes_written = write(cl, message->buffer, strlen(message->buffer));
     if(bytes_written < 0) {
         SET_ERR_CODE(message, 500);
         return;
@@ -379,7 +385,7 @@ static void construct_http_response(ssize_t client_sockd, struct httpObject* mes
 
     // if we have a (proper) GET request, send the data aka body of response
     if(strcmp(message->method, "GET") == 0 && message->status_code == 200) {
-        send_body(client_sockd, message);
+        send_body(cl, message);
     }
     
     return;
@@ -389,7 +395,6 @@ static void construct_http_response(ssize_t client_sockd, struct httpObject* mes
 static void WRITE_TO_LOGFILE(struct httpObject* message) {
 
     if(message->status_code == 200 || message->status_code == 201) {
-
         // CALCULATE SPACE NEEDED ON LOG FILE
         ssize_t offset = 9; // for ========\n
         ssize_t data_lines_needed = 0;
@@ -408,13 +413,11 @@ static void WRITE_TO_LOGFILE(struct httpObject* message) {
         char snum[20];
         sprintf(snum, "%ld", message->content_length);
         offset += strlen(snum); // for the value X in "length X\n"
-
         // LOCK MUTEX AND ADJUST LOG INDICES
         pthread_mutex_lock(&log_lock);
         message->log_start_index = LOG_INDEX;
         LOG_INDEX += offset;
         pthread_mutex_unlock(&log_lock);
-
         // LOGS HEADER INTO LOG FILE
         int log_fd = open(LOG_FILE_NAME, O_WRONLY);
         if(log_fd < 0) {
@@ -430,11 +433,9 @@ static void WRITE_TO_LOGFILE(struct httpObject* message) {
             return;
         }
         message->log_start_index += log_bytes_written;
-
         if(strcmp(message->method, "GET") == 0 || strcmp(message->method, "PUT") == 0) {
             // NEED TO LOG DATA AND END LINE
             ssize_t bytes_read_log = 0;
-
             // CLEAR BUFFER AND OPEN FILE SUBJECT TO THE GET REQUEST
             memset(message->buffer, '\0', sizeof(message->buffer));
             int fd = open(message->filename, O_RDONLY);
@@ -443,7 +444,6 @@ static void WRITE_TO_LOGFILE(struct httpObject* message) {
                 close(log_fd);
                 return;
             }
-
             // READ FROM FILE UNTIL EOF
             ssize_t bytes_read = read(fd, message->buffer, BUFFER_SIZE);
             if(bytes_read == -1) {
@@ -496,7 +496,6 @@ static void WRITE_TO_LOGFILE(struct httpObject* message) {
                     return;
                 }
             }
-
             // LOG END LINE AND RETURN ========\n
             char* end_line = "========\n";
             if(pwrite(log_fd, end_line, strlen(end_line), message->log_start_index) == -1) {
@@ -524,13 +523,11 @@ static void WRITE_TO_LOGFILE(struct httpObject* message) {
         offset += strlen(message->filename) + 2; // for "/FILENAME "
         offset += strlen(message->httpversion); // for "HTTPVERSION"
         offset += 18; // for " --- response ...\n"
-
         // LOCK MUTEX AND ADJUST LOG INDICES
         pthread_mutex_lock(&log_lock);
         message->log_start_index = LOG_INDEX;
         LOG_INDEX += offset;
         pthread_mutex_unlock(&log_lock);
-
         // LOG (FAILED REQUEST)
         int log_fd = open(LOG_FILE_NAME, O_WRONLY);
         if(log_fd == -1) {
@@ -551,158 +548,152 @@ static void WRITE_TO_LOGFILE(struct httpObject* message) {
 // ** "neccessary" stuff for the threads
 struct worker {
     int id;
+    int cl;
     pthread_t worker_id;
     struct httpObject message;
-    int client_sockd;
     pthread_cond_t condition_var;
     pthread_mutex_t* lock;
+    queue available_threads;
 };
 
 // **
 void* handle_request(void* thread) {
-    struct worker *w_thread = (struct worker*)thread;
-    
-    while(true) {
-        printf("\033[0;32m[%d] Thread is available.\n\033[0m", w_thread->id);
-        
-        // while we dont have a client socket id, sleep
+    struct worker *w_thread = (struct worker *)thread;
+    while (true) {
+
+        if(verbose) printf("\033[0;31m[%d] Thread is available.\n\033[0m", w_thread->id);
         pthread_mutex_lock(w_thread->lock);
-        while(w_thread->client_sockd < 0) {
+        while (w_thread->cl < 0) {
             pthread_cond_wait(&w_thread->condition_var, w_thread->lock);
         }
         pthread_mutex_unlock(w_thread->lock);
-        
-        // read, process, respond to request
-        printf("\033[0;33m[%d] Thread handling request from socket %d\n\033[0m", w_thread->id, w_thread->client_sockd);
-        read_http_request(w_thread->client_sockd, &w_thread->message);
-        process_request(w_thread->client_sockd, &w_thread->message);
-        construct_http_response(w_thread->client_sockd, &w_thread->message);
-        
-        // close socket, Log, set client socket to negative int
-        close(w_thread->client_sockd);
-        if(LOGGING) {
-            WRITE_TO_LOGFILE(&w_thread->message);
-        }
-        w_thread->client_sockd = INT_MIN;
-    }
+        if(verbose) printf("\033[0;33m[%d] Thread handling request from socket %d\n\033[0m", w_thread->id, w_thread->cl);
 
+        // read, process, respond to request
+        read_http_request(w_thread->cl, &w_thread->message);
+        process_request(w_thread->cl, &w_thread->message);
+        construct_http_response(w_thread->cl, &w_thread->message);
+        
+        if(LOGGING) { WRITE_TO_LOGFILE(&w_thread->message); }
+        if(verbose) printf("\033[0;32m[%d] Thread finished request, connection closing with socket %d\n\033[0m", w_thread->id, w_thread->cl);
+        close(w_thread->cl);
+        w_thread->cl = INT_MIN;
+        pthread_mutex_lock(w_thread->lock);
+        enqueue(w_thread->available_threads, w_thread->id);
+        pthread_mutex_unlock(w_thread->lock);
+        sem_post(&sem);
+    }
 }
 
 // **
 int main(int argc, char** argv) {
-    
-    int port_val;         // Port number. ex: 8080
-    int num_threads = 4;   // number of threads. Defaults to 4
-    int got_port = 0;     // 1 = port was given as an argument, 0 = wasnt (error)
-    int got_threads = 0; // 1 = argument -N was given, 0 = use default (4) threads
-    int logging = 0;     // 0 = no logging, 1 = logging
-    
-    if(argc < 2 || argc > 6) {
-        fprintf(stderr, "Error: use ./httpserver [portnumber] -N [num_threads] -l [log_file_name]\n");
+
+    char *PORT_NUMBER;        // port number (from args)
+    char *SERVER_NAME_STRING; // hostname (from args)
+    int NUM_THREADS = 4;      // number of threads. Defaults 4
+    int c = 0;
+    opterr = 0;
+    while ((c = getopt(argc, argv, "N:l:v")) != -1) {
+        switch (c) {
+        case 'N':
+        NUM_THREADS = atoi(optarg);
+        break;
+        case 'l':
+        LOG_FILE_NAME = optarg;
+        LOGGING = true;
+        break;
+        case 'v':
+        verbose = true;
+        break;
+        default:
+        fprintf(stderr, "usage: ./httpserver <hostname:port> [-N num_threads] [-l log_file_name] [-v verbose]\n");
         return EXIT_FAILURE;
+        }
     }
-    else {
-        for(int i = 1; i < argc; i++) {
-            if(strcmp(argv[i], "-N") == 0 && !(got_threads)) {
-                if(i+1 >= argc) {
-                    fprintf(stderr, "Error: use ./httpserver [portnumber] -N [num_threads] -l [log_file_name]\n");
-                    return EXIT_FAILURE;
-                }
-                else {
-                    num_threads = atoi(argv[i+1]);
-                    // need minimum of 2 threads to run
-                    if(num_threads < 2) {
-                        fprintf(stderr, "Error: use ./httpserver [portnumber] -N [num_threads] -l [log_file_name]\n");
-                        return EXIT_FAILURE;
-                    }
-                    got_threads = 1;
-                    i++;
-                }
-            }
-            else if (strcmp(argv[i], "-l") == 0 && !(logging)) {
-                if(i+1 >= argc) {
-                    fprintf(stderr, "Error: use ./httpserver [portnumber] -N [num_threads] -l [log_file_name]\n");
-                    return EXIT_FAILURE;
-                }
-                else {
-                    LOG_FILE_NAME = argv[i+1];
-                    logging = 1;
-                    i++;
-                }
-            }
-            else if (!got_port) {
-                port_val = atoi(argv[i]);
-                if(port_val <= 0) {
-                    fprintf(stderr, "Error: use ./httpserver [portnumber] -N [num_threads] -l [log_file_name]\n");
-                    return EXIT_FAILURE;
-                }
-                got_port = 1;
-            }
-            else {
-                fprintf(stderr, "Error: use ./httpserver [portnumber] -N [num_threads] -l [log_file_name]\n");
+    int index = optind;
+    if (index >= argc || NUM_THREADS > 100 || NUM_THREADS <= 0) {
+        fprintf(stderr, "usage: ./httpserver <hostname:port> [-N num_threads] [-l log_file_name] [-v verbose]\n");
+        return EXIT_FAILURE;
+    } else {
+        for (index = optind; index < argc; index++) {
+            char *token = strtok(argv[index], ":");
+            if (token == NULL) {
+                fprintf(stderr, "usage: ./httpserver <hostname:port> [-N num_threads] [-l log_file_name] [-v verbose]\n");
                 return EXIT_FAILURE;
+            }
+            SERVER_NAME_STRING = token;
+            token = strtok(NULL, ":");
+            if (token == NULL) {
+                fprintf(stderr, "usage: ./httpserver <hostname:port> [-N num_threads] [-l log_file_name] [-v verbose]\n");
+                return EXIT_FAILURE;
+            }
+            PORT_NUMBER = token;
+            int PORT_NUMBER_len = (int)strlen(PORT_NUMBER);
+            for (int i = 0; i < PORT_NUMBER_len; i++) {
+                if (PORT_NUMBER[i] < '0' || PORT_NUMBER[i] > '9') {
+                fprintf(stderr, "usage: ./httpserver <hostname:port> [-N num_threads] [-l log_file_name] [-v verbose]\n");
+                return EXIT_FAILURE;
+                }
             }
         }
     }
-    if(!got_port) {
-        fprintf(stderr, "Error: use ./httpserver [portnumber] -N [num_threads] -l [log_file_name]\n");
-        return EXIT_FAILURE;
-    }
-    if(logging) {
+    if(LOGGING) {
         int log_fd = open(LOG_FILE_NAME, O_RDWR | O_CREAT | O_TRUNC, 0664);
+        if(log_fd == -1) {
+            warn("error creating log file\n");
+            return EXIT_FAILURE;
+        }
         close(log_fd);
         LOGGING = true;
     }
     
-    // Create sockaddr_in with server information
-    struct sockaddr_in server_addr;
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(port_val);
-    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    socklen_t addrlen = sizeof(server_addr);
-    int server_sockd = socket(AF_INET, SOCK_STREAM, 0);
-    if(server_sockd == -1) fprintf(stderr, "ERROR 3: creating the server socket.\n");
+    struct hostent *hent = gethostbyname(SERVER_NAME_STRING);
+    if (hent == NULL) {
+        fprintf(stderr, "Error: gethostbyname failed.\n");
+        return EXIT_FAILURE;
+    }
+    struct sockaddr_in addr;
+    memcpy(&addr.sin_addr.s_addr, hent->h_addr, hent->h_length);
+    addr.sin_port = htons(atoi(PORT_NUMBER));
+    addr.sin_family = AF_INET;
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
     int enable = 1;
-    int ret = setsockopt(server_sockd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable));
-    ret = bind(server_sockd, (struct sockaddr *) &server_addr, addrlen);
-    ret = listen(server_sockd, 50);
-    if(ret < 0) fprintf(stderr, "ERROR 4: creating the server socket.\n");
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable));
+    bind(sock, (struct sockaddr *)&addr, sizeof(addr));
+    listen(sock, 128);
 
-    struct sockaddr client_addr;
-    socklen_t client_addrlen = sizeof(client_addr);
-
-    struct worker workers[num_threads];  // creates array of worker threads
+    struct worker *workers = (worker *)malloc(NUM_THREADS * sizeof(worker));
+    queue available_threads = new_queue();
+    sem_init(&sem, 0, NUM_THREADS);
     pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;   // initializes worker mutex
 
-    // initializes threads
-    for(int i = 0; i < num_threads; i++) {
-        workers[i].client_sockd = INT_MIN;
-        workers[i].id = i;
-        workers[i].condition_var = (pthread_cond_t)PTHREAD_COND_INITIALIZER;
-        workers[i].lock = &lock;
-        
-        int is_error = pthread_create(&workers[i].worker_id, NULL, &handle_request, &workers[i]);
-        if(is_error < 0) fprintf(stderr, "ERROR 2: creating a thread.\n");
+    printf("Starting httpserver... (threads: %d)\n", NUM_THREADS);
 
+    // initializes threads
+    for(int i = 0; i < NUM_THREADS; i++) {
+        workers[i].cl = INT_MIN;
+        workers[i].id = i;
+        workers[i].condition_var = PTHREAD_COND_INITIALIZER;
+        workers[i].lock = &lock;
+        workers[i].available_threads = available_threads;
+        
+        int err = pthread_create(&workers[i].worker_id, NULL, &handle_request, &workers[i]);
+        if (err < 0) {
+            fprintf(stderr, "error creating a thread.\n");
+        }
+        enqueue(available_threads, i);
     }
 
-    //  " D I S P A T C H E R "  thread //
-    int target_thread = 0;
     while (true) {
-        
-        // accept a client connection
-        printf("[+] server is waiting...\n");
-        int client_sockd = accept(server_sockd, &client_addr, &client_addrlen);
-        if(client_sockd == -1) fprintf(stderr, "ERROR: cannot connect to socket .\n");
+        int cl = accept(sock, NULL, NULL);
+        if (cl < 0) { err(EXIT_FAILURE, "error connecting to client\n"); }
 
-        while(workers[target_thread].client_sockd > 0) {
-            target_thread++;
-            if(target_thread >= num_threads) target_thread = 0;
-        }
-
-        workers[target_thread].client_sockd = client_sockd;
+        sem_wait(&sem);
+        pthread_mutex_lock(&lock);
+        int target_thread = dequeue(available_threads);
+        workers[target_thread].cl = cl;
         pthread_cond_signal(&workers[target_thread].condition_var);
+        pthread_mutex_unlock(&lock);
 
     }
 

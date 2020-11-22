@@ -1,27 +1,27 @@
 #ifndef _QUEUE_H_INCLUDE_
 #define _QUEUE_H_INCLUDE_
+#include <cstdint>
 
-// Exported type --------------------------------------------------------------
-typedef struct QueueObj* Queue;
+/*
+    QUEUE ADT
+*/
 
-// Returns reference to new empty Queue object. 
-Queue newQueue(void);
+typedef struct queue_t *queue;
 
-// Frees all heap memory associated with Queue *pQ, and sets *pQ to NULL.
-void freeQueue(Queue* pQ);
+queue new_queue();
 
-// Returns the value at the front of Q.
-// Pre: !isEmpty(Q)
-int getFront(Queue Q);
+int size(queue Q);
 
-// Returns true (1) if Q is empty, otherwise returns false (0)
-int isEmpty(Queue Q);
+bool is_empty(queue Q);
 
-// Places new data element at the end of Q
-void Enqueue(Queue Q, int data);
+void enqueue(queue Q, int id);
 
-// Deletes element at front of Q
-// Pre: !isEmpty(Q)
-void Dequeue(Queue Q);
+int dequeue(queue Q);
+
+void make_empty(queue Q);
+
+void free_queue(queue *Q);
+
+void print_queue(queue Q);
 
 #endif

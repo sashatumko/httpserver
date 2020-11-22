@@ -1,36 +1,29 @@
-# C compiler
-CC = gcc
+TARGET=httpserver
+SOURCES=$(TARGET).cpp queue.cpp
+CXXFLAGS=-std=gnu++11 -g -Wall -Wextra -Wpedantic -Wshadow -pthread -O2
+OBJECTS=$(SOURCES:.cpp=.o)
+DEPS=$(SOURCES:.cpp=.d)
+INCLUDES = queue.h
 
-# C compiler flags
-CFLAGS = -std=gnu11 -g -Wall -Wextra -Wpedantic -Wshadow -pthread -O2
-
-# Target executable name
-TARGET = httpserver
-# ADT = queue
+CXX=clang++
 
 all: $(TARGET)
 
-# Used to build executable from .o file(s)
-$(TARGET): $(TARGET).o
-	$(CC) $(CFLAGS) -o $(TARGET) $(TARGET).o
-
-# Used to build .o file(s) from .c files(s)
-$(TARGET).o: $(TARGET).c
-	$(CC) $(CFLAGS) -c $(TARGET).c
-
-# clean built artifacts
 clean:
-	rm -f $(TARGET) $(TARGET).o
+	-rm $(DEPS) $(OBJECTS)
 
-# Used to output a help message for the Makefile
-help:
-	@echo  "Usage: make [target] ...\n"
-	@echo  "Miscellaneous:"
-	@echo  "help\t\t\tShows this help\n"
-	@echo  "Build:"
-	@echo  "all\t\t\tBuild all the project\n"
-	@echo  "Cleaning:"
-	@echo  "clean\t\t\tRemove all intermediate objects"
+spotless: clean
+	-rm $(TARGET)
 
-check:
-	valgrind --leak-check=full ./httpserver -N 8 8080
+format:
+	clang-format -i $(SOURCES) $(INCLUDES)
+
+$(TARGET): $(OBJECTS)
+	$(CXX) $(CXXFLAGS) -o $@ $(OBJECTS)
+
+-include $(DEPS)
+
+.PHONY: all clean format spotless
+
+memcheck :
+	valgrind --leak-check=full ./rpcserver localhost:8912
