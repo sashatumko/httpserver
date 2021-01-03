@@ -14,7 +14,7 @@ ctrl_c() {
 }
 
 start_server() {
-  ./httpserver 8080 &
+  ./httpserver localhost:8080 &
   sleep 0.5
 }
 
@@ -37,8 +37,6 @@ print_banner() {
   CYAN='\033[0;36m'
   echo -e "${CYAN}$1${NC}"
 }
-
-# =========== start of test script functions ==================
 
 # sends 8 huge binary files (abt 400 MB each)
 fat_test() {
@@ -252,9 +250,6 @@ test_eleven() {
 }
 
 # GET a file with HTTP version wrong HTTP/0.9
-# if the client sends anything besides HTTP/1.1 (like HTTP/0.9) respond with a bad request. 
-# Don't try to match your HTTP/X.Y string in your response, just send:
-# “HTTP/1.1 400 Bad Request\r\n\r\n”
 test_twelve() {
   print_banner "Test 12: ${test_str[12]}"
   start_server
@@ -268,13 +263,11 @@ test_twelve() {
   check_test
 }
 
-# GET, HEAD "/".
-# example: “GET / HTTP/1.1\r\n\r\n” (BAD REQUEST)
+# GET, HEAD "/" (BAD REQUEST)
 test_thirteen() {
   print_banner "Test 13: ${test_str[13]}"
   start_server
   printf """HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n""" > t13expected
-  # STILL NEED GET
   curl -s -I http://0:8080/ -o t13o2
   kill_server
   diff t13expected t13o2
@@ -390,7 +383,6 @@ test_sixteen() {
 }
 
 # GET request with one of the irrevelent headers messed up (400)
-#failing
 test_seventeen() {
   print_banner "Test 17: ${test_str[17]}"
   start_server
@@ -407,7 +399,7 @@ test_seventeen() {
   check_test
 }
 
-# CLARKS TEST
+# diversity test
 test_eighteen() {
   print_banner "Test 18: ${test_str[18]}"
   start_server
@@ -433,7 +425,6 @@ test_eighteen() {
 
   kill_server
 
-  # Diff the files, if there's any printout before "test done!!!", then a test "failed"
   diff out1 source_small && \
   diff out2 source_medium && \
   diff out3 source_large && \
@@ -514,8 +505,11 @@ printf "Enter number: "
 read TEST
 
 echo -e "${MAGENTA}\n===== Build httpserver =====\n${NC}"
-make clean
+cd ..
 make
+mv ./httpserver ./testing/httpserver
+make clean
+cd ./testing/
 
 echo -e "${MAGENTA}\n====== START of TESTS ======\n${NC}"
 case $TEST in
@@ -569,6 +563,5 @@ read CLEAN
 if [[ $CLEAN == 'y' ]]; then
   rm *.out
   rm -f t81.s t83.txt t82.mp3
-  ls | grep -P '^(?!Makefile)(?!httpserver)([a-zA-Z0-9_-]+){1,27}$' | xargs rm &> /dev/null
-  make clean
+  ls | grep -P '^(?!Makefile)([a-zA-Z0-9_-]+){1,27}$' | xargs rm &> /dev/null
 fi

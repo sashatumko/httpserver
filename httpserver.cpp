@@ -331,28 +331,25 @@ static void process_request(ssize_t cl, struct http_object* message) {
 // construct response
 static void construct_http_response(ssize_t cl, struct http_object* message) {
 
-    char* status_message;
+    char status_message[20];
     switch (message->status_code) {
         case 200:
-            status_message = "OK";
+            strcpy(status_message, "OK");
             break;
         case 201:
-            status_message = "Created";
+            strcpy(status_message, "Created");
             break;
         case 400:
-            status_message = "Bad Request";
+            strcpy(status_message, "Bad Request");
             break;
         case 403:
-            status_message = "Forbidden";
+            strcpy(status_message, "Forbidden");
             break;
         case 404:
-            status_message = "Not Found";
-            break;
-        case 500:
-            status_message = "Internal Server Error";
+            strcpy(status_message, "Not Found");
             break;
         default:
-            status_message = "Internal Server Error";
+            strcpy(status_message, "Internal Server Error");
             message->status_code = 500;
     }
 

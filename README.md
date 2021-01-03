@@ -14,9 +14,3 @@ Optional flags are:<br />
 curl -s http://localhost:8080/filename<br />
 curl -s -I http://localhost:8080/filename<br />
 curl -s -T filename1 http://localhost:8080/filename2<br />
-
-## todo
-1. fix logging, its ugly right now and messy
-2. fix string literal warnings
-3. clean up code, allow for periods and other file names (don't allow attacks)
-4. add more functionality (more request types)
