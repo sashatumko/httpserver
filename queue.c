@@ -38,6 +38,7 @@ typedef struct queue_t {
   size_t size;
   size_t nthreads;
   sem_t sem; // sem for blocking threads
+  pthread_mutex_t mtx;
 } queue_t;
 
 // constructor 
@@ -47,18 +48,23 @@ queue new_queue(size_t n) {
   q->size = 0;
   q->nthreads = n;
   sem_init(&q->sem, 0, n);
+  pthread_mutex_init(&q->mtx, NULL);
   return q;
 }
 
 // returns number of queued up elements
 size_t size(queue q) { 
-
+  
   if (q == NULL) {
     warn("queue: bad pointer");
     return -1;
   }
 
-  return (q->size); 
+  pthread_mutex_lock(&q->mtx); /* critical */
+  size_t s = q->size;
+  pthread_mutex_unlock(&q->mtx); /* critical */
+
+  return s; 
 }
 
 // returns 1 if queue is empty
@@ -69,7 +75,11 @@ int is_empty(queue q) {
     return -1;
   }
 
-  return (q->size == 0); 
+  pthread_mutex_lock(&q->mtx); /* critical */
+  int ret = (q->size == 0); 
+  pthread_mutex_unlock(&q->mtx); /* critical */
+
+  return ret;
 }
 
 // insert a thread id onto the back of the queue
@@ -79,6 +89,7 @@ void enqueue(queue q, int id) {
     warn("queue: bad pointer");
     return;
   }
+  pthread_mutex_lock(&q->mtx); /* critical */
 
   if (q->size == 0) {
     q->front = q->back = new_node(id);
@@ -88,17 +99,23 @@ void enqueue(queue q, int id) {
   }
 
   q->size++;
+  pthread_mutex_unlock(&q->mtx); /* critical */
+
+  sem_post(&q->sem); // FLAG -> available
 }
 
 // pop and return thread id off the front of the queue 
 // returns -1 if error
 int dequeue(queue q) {
 
-  if (q == NULL || q->size == 0) {
+  sem_wait(&q->sem); // SLEEP IF NO THREADS AVAILABLE
+
+  if (q == NULL) {
     warn("queue: dequeue err");
     return -1;
   }
 
+  pthread_mutex_lock(&q->mtx); /* critical */
   int id = q->front->thread_id;
   node temp = q->front;
   if (q->size == 1) {
@@ -109,6 +126,7 @@ int dequeue(queue q) {
 
   free_node(&temp);
   q->size--;
+  pthread_mutex_unlock(&q->mtx); /* critical */
 
   return id;
 }
@@ -121,9 +139,11 @@ void make_empty(queue q) {
     return;
   }
 
+  pthread_mutex_lock(&q->mtx); /* critical */
   while (q->size > 0) {
     dequeue(q);
   }
+  pthread_mutex_unlock(&q->mtx); /* critical */
 
 }
 
@@ -131,7 +151,9 @@ void make_empty(queue q) {
 void free_queue(queue *q) {
 
   if (q != NULL && *q != NULL) {
+    pthread_mutex_lock(&(*q)->mtx); /* critical */
     make_empty(*q);
+    pthread_mutex_unlock(&(*q)->mtx); /* critical */
     free(*q);
     *q = NULL;
   }
@@ -141,11 +163,13 @@ void free_queue(queue *q) {
 // print elements on queue
 void print_queue(queue q) {
 
+  pthread_mutex_lock(&q->mtx); /* critical */
   node head = q->front;
   while (head != NULL) {
     printf("%d ", head->thread_id);
     head = head->next;
   }
   printf("\n");
+  pthread_mutex_unlock(&q->mtx); /* critical */
 
 }

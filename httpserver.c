@@ -19,11 +19,11 @@
 #include <limits.h>
 #include <netdb.h>
 
-sem_t sem; // sem for putting dispatcher to sleep
 bool verbose = false;
 
 // stores all key data of each http request
 struct http_object {
+    int cl;
     char method[5];
     char filename[256]; 
     char httpversion[9];
@@ -34,369 +34,308 @@ struct http_object {
     uint16_t index;  // used when part of body is read while reading header
 };
 
-// sets the status code to 400, 403, 404, or 500 and content length to 0
-static void set_err_code(struct http_object* message, uint16_t code) {
-    message->status_code = code;
-    message->content_length = 0;
-    return;
-}
+// construct response
+static void send_response_header(struct http_object* msg) {
 
-// writes contents of file (filename) to cl. (for a GET response)
-static void send_body(ssize_t cl, struct http_object* message) {
-
-    int8_t fd = open(message->filename, O_RDONLY);
-    ssize_t bytes_read = read(fd, message->buffer, BUFFER_SIZE);
-    if(bytes_read == -1) { set_err_code(message, 500); }
-
-    while(bytes_read > 0) {
-        ssize_t bytes_written = write(cl, message->buffer, bytes_read);
-        if(bytes_written == -1) {
-            set_err_code(message, 500);
+    char status_msg[30];
+    switch (msg->status_code) {
+        case 200:
+            strcpy(status_msg, "OK");
             break;
-        }
-        bytes_read = read(fd, message->buffer, BUFFER_SIZE);
-        if(bytes_read == -1) {
-            set_err_code(message, 500);
+        case 201:
+            strcpy(status_msg, "Created");
             break;
-        }
+        case 400:
+            strcpy(status_msg, "Bad Request");
+            break;
+        case 403:
+            strcpy(status_msg, "Forbidden");
+            break;
+        case 404:
+            strcpy(status_msg, "Not Found");
+            break;
+        default:
+            strcpy(status_msg, "Internal Server Error");
+            msg->status_code = 500;
     }
-    close(fd);
-    return;
+
+    // clear buffer
+    memset(msg->buffer, '\0', sizeof(msg->buffer));
+    sprintf(msg->buffer, "HTTP/1.1 %d %s\r\nContent-Length: %zu\r\n\r\n", msg->status_code, status_msg, msg->content_length);
+    if(write(msg->cl, msg->buffer, strlen(msg->buffer)) < 0) return;
+    
 }
 
-
+// sets the status code to 400, 403, 404, or 500 and content length to 0
+static void http_error_reply(struct http_object* msg, uint16_t code) {
+    msg->status_code = code;
+    msg->content_length = 0;
+    send_response_header(msg);
+    return;
+}
 
 // sets http_object fields to 0 or null
-static void initialize(struct http_object* message) {
-    memset(message->method, '\0', sizeof(message->method));
-    memset(message->filename, '\0', sizeof(message->filename));
-    memset(message->httpversion, '\0', sizeof(message->httpversion));
-    memset(message->buffer, '\0', sizeof(message->buffer));
-    message->content_length = 0;
-    message->status_code = 0;
-    message->extra_bytes = 0;
-    message->index = 0;
+static void initialize(struct http_object* msg, int cl) {
+    memset(msg->method, '\0', sizeof(msg->method));
+    memset(msg->filename, '\0', sizeof(msg->filename));
+    memset(msg->httpversion, '\0', sizeof(msg->httpversion));
+    memset(msg->buffer, '\0', sizeof(msg->buffer));
+    msg->content_length = 0;
+    msg->status_code = 0;
+    msg->extra_bytes = 0;
+    msg->index = 0;
+    msg->cl = cl;
 }
 
-// checks if filename is valid, tries to open file, if opens reads file size
-static void process_file(struct http_object* message) {
-
-    if(strcmp(message->httpversion, "HTTP/1.1") != 0) {
-        set_err_code(message, 400);
-        return;
-    }
-    if(!(valid_filename(message->filename))) {
-        set_err_code(message, 400);
-        return;
-    }
-    
-    // attempt to open file (errno 2 = no such file/directory)
-    int fd = open(message->filename, O_RDONLY);
-    if(fd == -1 && errno == 2) {
-        set_err_code(message, 404);
-        return;
-    }
-    
-    // pull file info using stat
-    struct stat fileStat;
-    if(stat(message->filename, &fileStat) < 0) {
-        set_err_code(message, 500);
-        close(fd);
-        return;
-    }
-
-    // if file is directory (bad req)
-    if(S_ISDIR(fileStat.st_mode)) {
-        set_err_code(message, 400);
-        close(fd);
-        return;
-    }
-
-    // if file has read perms (owner)
-    if(fileStat.st_mode & S_IRUSR) {
-        message->status_code = 200;
-        message->content_length = fileStat.st_size;
-    }
-    else {
-        set_err_code(message, 403);
-        close(fd);
-        return;
-    }
-
-    close(fd);
-    return;
-    
-}
-
-// read http request
-static void read_http_request(ssize_t cl, struct http_object* message) {
-
-    //initialize http_object fields
-    initialize(message);
+int read_header(struct http_object* msg) {
     ssize_t bytes = 0;
     char* double_crlf_ptr = NULL;
 
     // read stream until either found a double CRLF or read 4 KiB
-    while(double_crlf_ptr == NULL && bytes < MAX_HEADER_SIZE) {
-        ssize_t bytes_read = read(cl, (void*)(message->buffer + bytes), MAX_HEADER_SIZE - bytes);
-        if(bytes_read < 0) {
-            set_err_code(message, 500);
-            return;
-        }
+    while(bytes < MAX_HEADER_SIZE) {
+        ssize_t bytes_read = read(msg->cl, (void*)(msg->buffer + bytes), MAX_HEADER_SIZE - bytes);
+        if(bytes_read < 0) break;
+
         bytes += bytes_read;
-        double_crlf_ptr = strstr(message->buffer, "\r\n\r\n");
+        double_crlf_ptr = strstr(msg->buffer, "\r\n\r\n");
+        if(double_crlf_ptr != NULL) {
+            // stores amount of "extra" (body) bytes read along with header
+            double_crlf_ptr += 4; 
+            msg->index = double_crlf_ptr - msg->buffer; // aka header size including double crlf
+            msg->extra_bytes = bytes - msg->index; // size of data read in buffer minus header
+            return 1;
+        }
     }
 
-    // Bad Request (?) --- header is over 4 KiB
-    if(double_crlf_ptr == NULL) {
-        set_err_code(message, 400);
+    return -1;
+}
+
+// writes contents of file (filename) to cl. (for a GET response)
+static void send_body(struct http_object* msg) {
+
+    int8_t fd = open(msg->filename, O_RDONLY);
+    ssize_t bytes_read = read(fd, msg->buffer, BUFFER_SIZE);
+    if(bytes_read == -1) return;
+
+    while(bytes_read > 0) {
+        ssize_t bytes_written = write(msg->cl, msg->buffer, bytes_read);
+        if(bytes_written == -1) break;
+        
+        bytes_read = read(fd, msg->buffer, BUFFER_SIZE);
+        if(bytes_read == -1) break;
+    }
+    close(fd);
+    return;
+}
+
+// read http request
+static void read_http_request(struct http_object* msg) {
+
+    if(read_header(msg) == -1) {
+        http_error_reply(msg, 400);
         return;
     }
-    
-    // stores amount of "extra" (body) bytes read along with header
-    double_crlf_ptr += 4; 
-    message->index = double_crlf_ptr - message->buffer; // aka header size including double crlf
-    message->extra_bytes = bytes - message->index; // size of data read in buffer minus header
 
     // fill http_object fields (method, filename, http version, content-length)
-    int8_t var_filled = sscanf(message->buffer, "%s /%s %s", message->method, message->filename, message->httpversion);
-    if(var_filled == 3) {
-        if(strcmp(message->method, "PUT") == 0) {
+    int8_t var_filled = sscanf(msg->buffer, "%s /%s %s", msg->method, msg->filename, msg->httpversion);
+    if(var_filled != 3) {
+        http_error_reply(msg, 400);
+    } else {
+        if(strcmp(msg->method, "PUT") == 0) {
             // get content length (for a PUT)
-            char* cl_ptr = strstr(message->buffer, "Content-Length:");
-            if(cl_ptr != NULL) {
-                var_filled = sscanf(cl_ptr, "Content-Length: %zd", &message->content_length);
-                if(var_filled != 1) {
-                    set_err_code(message, 400);
-                    return;
+            char* cl_ptr = strstr(msg->buffer, "Content-Length:");
+            if(cl_ptr == NULL) {
+                http_error_reply(msg, 400);
+            } else {
+                if(sscanf(cl_ptr, "Content-Length: %zd", &msg->content_length) != 1) {
+                    http_error_reply(msg, 400);
                 }
             }
-            else {
-                set_err_code(message, 400);
-                return;
-            }
         }
-    }
-    else {
-        set_err_code(message, 400);
-        return;
     }
     
     return;
 }
 
-// process request
-static void process_request(ssize_t cl, struct http_object* message) {
+static void http_get(struct http_object* msg) {
+    
+    struct stat fileStat;
 
-    // error occured at some point previously, return and proceed to send response
-    if(message->status_code != 0) {
-        return;
-    }
-    else if(strcmp(message->method, "GET") == 0) {
-        process_file(message);
-    }
-    else if(strcmp(message->method, "HEAD") == 0) {
-        process_file(message);
-    }
-    else if(strcmp(message->method, "PUT") == 0) {
-
-        if(strcmp(message->httpversion, "HTTP/1.1") != 0) {
-            set_err_code(message, 400);
-            return;
-        }
-        if(!(valid_filename(message->filename))) {
-            set_err_code(message, 400);
-            return;
-        }
-        // create file if doesnt exist, or verify its perms/type if exists
-        int fd = open(message->filename, O_WRONLY | O_TRUNC);
-        if(fd == -1 && errno == 2) {        
-            fd = open(message->filename, O_WRONLY | O_CREAT | O_TRUNC, 0664);
-            message->status_code = 201;
-        }
-        else {
-            struct stat fileStat;
-            if(stat(message->filename, &fileStat) < 0) {
-                set_err_code(message, 500);
-                close(fd);
-                return;
-            }
-            // check if file is actually a directory
-            if(S_ISDIR(fileStat.st_mode)) {
-                set_err_code(message, 400);
-                close(fd);
-                return;
-            }
-            // check if file has write perms (owner)
-            if(fileStat.st_mode & S_IWUSR) {
-                message->status_code = 200;
-            }
-            else {
-                set_err_code(message, 403);
-                close(fd);
-                return;
-            }
-
-        }
-        close(fd);
-
-        // since everything seems good so far, send an 100 continue (if expected)
-        char* ex_continue_ptr = strstr(message->buffer, "Expect: 100-continue");
-        if(ex_continue_ptr != NULL) {
-            char continue_resp[50] = "HTTP/1.1 100 Continue\r\n\r\n";
-            if( write(cl, continue_resp, strlen(continue_resp)) == -1 ) {
-                set_err_code(message, 500);
-                return;
-            }
-        }
-    }
-    else {
-        set_err_code(message, 400);
+    if(stat(msg->filename, &fileStat) != 0 ) {
+        http_error_reply(msg, 404); // file not found
+    } else if(S_ISDIR(fileStat.st_mode)) {
+        http_error_reply(msg, 400); // file is a dir
+    } if(!(fileStat.st_mode & S_IRUSR)) {
+        http_error_reply(msg, 403); // file does not have read perms
+    } else {
+        msg->status_code = 200;
+        msg->content_length = fileStat.st_size;
+        send_response_header(msg);
+        send_body(msg);
     }
 
-    // write data (for a put request)
-    if(strcmp(message->method, "PUT") == 0 && (message->status_code == 200 || message->status_code == 201)) {
-        
-        int fd = open(message->filename, O_WRONLY);
+    return;
+}
+
+static void http_head(struct http_object* msg) {
+    
+    struct stat fileStat;
+
+    if(stat(msg->filename, &fileStat) != 0 ) {
+        http_error_reply(msg, 404); // file not found
+    } else if(S_ISDIR(fileStat.st_mode)) {
+        http_error_reply(msg, 400); // file is a dir
+    } if(!(fileStat.st_mode & S_IRUSR)) {
+        http_error_reply(msg, 403); // file does not have read perms
+    } else {
+        msg->status_code = 200;
+        msg->content_length = fileStat.st_size;
+        send_response_header(msg);
+    }
+
+    return;
+}
+
+static void http_put(struct http_object* msg) {
+
+    int fd;
+    struct stat fileStat;
+
+    if(stat(msg->filename, &fileStat) != 0 ) {
+        // file doesn't exist, try to create
+        fd = open(msg->filename, O_WRONLY | O_CREAT | O_TRUNC, 0664);
         if(fd < 0) {
-            set_err_code(message, 500);
+            http_error_reply(msg, 403); // could not create
+            return;
+        } else {
+            msg->status_code = 201;
+        }
+    } else if(S_ISDIR(fileStat.st_mode)) {
+        http_error_reply(msg, 400); // file is a dir
+        return;
+    } if(!(fileStat.st_mode & S_IWUSR)) {
+        http_error_reply(msg, 403); // file does not have write perms
+        return;
+    } else {
+        // exists
+        fd = open(msg->filename, O_WRONLY | O_TRUNC);
+        if(fd < 0) {
+            http_error_reply(msg, 403); // could not open
+            return;
+        } else {
+            msg->status_code = 200;
+        }
+    }
+
+    // read data from server write 2 file
+    ssize_t write_count = 0;
+    ssize_t bytes_needed = msg->content_length;
+
+    // if there are bytes left over from first read
+    if(msg->extra_bytes) {
+        char* request_body = msg->buffer + msg->index;
+        if (bytes_needed < msg->extra_bytes) {
+            msg->extra_bytes = bytes_needed;
+        }
+        write_count = write(fd, request_body, msg->extra_bytes);
+        if(write_count == -1) {
+            http_error_reply(msg, 500);
             close(fd);
             return;
         }
-        
-        // read data from server write 2 file
-        ssize_t write_count = 0;
-        ssize_t bytes_needed = message->content_length;
-
-        // if there are bytes left over from first read
-        if(message->extra_bytes) {
-            char* request_body = message->buffer + message->index;
-            if (bytes_needed < message->extra_bytes) {
-                message->extra_bytes = bytes_needed;
-            }
-            write_count = write(fd, request_body, message->extra_bytes);
+        bytes_needed -= write_count;
+    }
+    while(bytes_needed > 0) {
+        ssize_t read_count = read(msg->cl, msg->buffer, BUFFER_SIZE);
+        if(read_count == -1) {
+            http_error_reply(msg, 500);
+            close(fd);
+            return;
+        }
+        if(read_count > bytes_needed) {
+            write_count = write(fd, msg->buffer, bytes_needed);
             if(write_count == -1) {
-                set_err_code(message, 500);
+                http_error_reply(msg, 500);
                 close(fd);
                 return;
             }
             bytes_needed -= write_count;
         }
-        while(bytes_needed > 0) {
-            ssize_t read_count = read(cl, message->buffer, BUFFER_SIZE);
-            if(read_count == -1) {
-                set_err_code(message, 500);
+        else {
+            write_count = write(fd, msg->buffer, read_count);
+            if(write_count == -1) {
+                http_error_reply(msg, 500);
                 close(fd);
                 return;
             }
-            if(read_count > bytes_needed) {
-                write_count = write(fd, message->buffer, bytes_needed);
-                if(write_count == -1) {
-                    set_err_code(message, 500);
-                    close(fd);
-                    return;
-                }
-                bytes_needed -= write_count;
-            }
-            else {
-                write_count = write(fd, message->buffer, read_count);
-                if(write_count == -1) {
-                    set_err_code(message, 500);
-                    close(fd);
-                    return;
-                }
-                bytes_needed -= write_count;
-            }
+            bytes_needed -= write_count;
         }
-        close(fd);
     }
+    close(fd);
 
-    return;
+    msg->content_length = 0;
+    send_response_header(msg);
+
 }
 
-// construct response
-static void construct_http_response(ssize_t cl, struct http_object* message) {
+// process request
+static void process_request(struct http_object* msg) {
 
-    char status_message[30];
-    switch (message->status_code) {
-        case 200:
-            strcpy(status_message, "OK");
-            break;
-        case 201:
-            strcpy(status_message, "Created");
-            break;
-        case 400:
-            strcpy(status_message, "Bad Request");
-            break;
-        case 403:
-            strcpy(status_message, "Forbidden");
-            break;
-        case 404:
-            strcpy(status_message, "Not Found");
-            break;
-        default:
-            strcpy(status_message, "Internal Server Error");
-            message->status_code = 500;
+    if(strcmp(msg->httpversion, "HTTP/1.1") != 0) {
+        http_error_reply(msg, 400);
+    } else if(!(valid_filename(msg->filename))) {
+        http_error_reply(msg, 400);
+    } else if(!strcmp(msg->method, "GET")) {
+        http_get(msg);
+    } else if(!strcmp(msg->method, "HEAD")) {
+        http_head(msg);
+    } else if(!strcmp(msg->method, "PUT")) {
+        http_put(msg);
+    } else {
+        http_error_reply(msg, 400);
     }
 
-    // clear buffer
-    memset(message->buffer, '\0', sizeof(message->buffer));
-
-    ssize_t content_len = 0;
-    if(strcmp(message->method, "GET") == 0 || strcmp(message->method, "HEAD") == 0) {
-        content_len = message->content_length;
-    }
-    sprintf(message->buffer, "HTTP/1.1 %d %s\r\nContent-Length: %zu\r\n\r\n", message->status_code, status_message, content_len);
-    ssize_t bytes_written = write(cl, message->buffer, strlen(message->buffer));
-    if(bytes_written < 0) {
-        set_err_code(message, 500);
-        return;
-    }
-
-    // if we have a (proper) GET request, send the data aka body of response
-    if(strcmp(message->method, "GET") == 0 && message->status_code == 200) {
-        send_body(cl, message);
-    }
-    
     return;
 }
 
 // worker thread data
 struct worker {
-    int id;
+    int tid;
     int cl;
     pthread_t worker_id;
-    struct http_object message;
-    pthread_cond_t condition_var;
-    pthread_mutex_t* lock;
+    struct http_object msg;
+    sem_t sem;
     queue available_threads;
 };
 
 // worker thread function
 void* handle_request(void* thread) {
+
     struct worker *w_thread = (struct worker *)thread;
+
     while (true) {
 
-        if(verbose) printf("\033[0;31m[%d] Thread is available.\n\033[0m", w_thread->id);
-        pthread_mutex_lock(w_thread->lock);
+        if(verbose) printf("\033[0;31m[%d] Thread is available.\n\033[0m", w_thread->tid);
+        
         while (w_thread->cl < 0) {
-            pthread_cond_wait(&w_thread->condition_var, w_thread->lock);
+            sem_wait(&w_thread->sem);
         }
-        pthread_mutex_unlock(w_thread->lock);
-        if(verbose) printf("\033[0;33m[%d] Thread handling request from socket %d\n\033[0m", w_thread->id, w_thread->cl);
+        
+        if(verbose) printf("\033[0;33m[%d] Thread handling request from socket %d\n\033[0m", w_thread->tid, w_thread->cl);
 
         // read, process, respond to request
-        read_http_request(w_thread->cl, &w_thread->message);
-        process_request(w_thread->cl, &w_thread->message);
-        construct_http_response(w_thread->cl, &w_thread->message);
+        initialize(&w_thread->msg, w_thread->cl);
+        read_http_request(&w_thread->msg);
+        if(w_thread->msg.status_code == 0) {
+            process_request(&w_thread->msg);
+        }
         
-        if(verbose) printf("\033[0;32m[%d] Thread finished request, connection closing with socket %d\n\033[0m", w_thread->id, w_thread->cl);
+        
+        if(verbose) printf("\033[0;32m[%d] Thread finished request, connection closing with socket %d\n\033[0m", w_thread->tid, w_thread->cl);
         close(w_thread->cl);
+
         w_thread->cl = INT_MIN;
-        pthread_mutex_lock(w_thread->lock);
-        enqueue(w_thread->available_threads, w_thread->id);
-        pthread_mutex_unlock(w_thread->lock);
-        sem_post(&sem);
+        enqueue(w_thread->available_threads, w_thread->tid);
     }
 }
 
@@ -418,10 +357,10 @@ int get_nthreads_arg(char *optarg) {
 
 int main(int argc, char** argv) {
 
-    int port = 8080;        // port number (from args)
+    int port = 8080;              // port number (from args)
     char *hostname = "localhost"; // hostname (from args)
-    int8_t nthreads = 4;      // number of threads. Defaults 4
-    
+    int8_t nthreads = 4;          // number of threads. Defaults 4
+    int client_socket = INT_MIN;
     int c = 0;
     opterr = 0;
     
@@ -469,6 +408,7 @@ int main(int argc, char** argv) {
         warn_exit("error: gethostbyname failed.\n");
     }
 
+    // initialize socket
     struct sockaddr_in addr;
     memcpy(&addr.sin_addr.s_addr, hent->h_addr, hent->h_length);
     addr.sin_port = htons(port);
@@ -479,39 +419,33 @@ int main(int argc, char** argv) {
     bind(sock, (struct sockaddr *)&addr, sizeof(addr));
     listen(sock, 128);
 
+    // allocate thread structs and sync queue 
     struct worker *workers = malloc(nthreads * sizeof(struct worker));
     queue available_threads = new_queue(nthreads);
-    sem_init(&sem, 0, nthreads);
-    pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
     printf("Starting httpserver... [host: %s port: %d threads: %d]\n", hostname, port, nthreads);
 
     // initializes threads
     for(int i = 0; i < nthreads; i++) {
         workers[i].cl = INT_MIN;
-        workers[i].id = i;
-        int ret = pthread_cond_init(&workers[i].condition_var, NULL);
-        if(ret != 0) warn("wtf"); // debug
-        workers[i].lock = &lock;
+        workers[i].tid = i;
         workers[i].available_threads = available_threads;
+        sem_init(&workers[i].sem, 0, 1);
         
-        int err = pthread_create(&workers[i].worker_id, NULL, &handle_request, &workers[i]);
-        if (err < 0) {
-            fprintf(stderr, "error creating a thread.\n");
+        if (pthread_create(&workers[i].worker_id, NULL, &handle_request, &workers[i]) < 0) {
+            warn_exit("error creating a thread.\n");
         }
         enqueue(available_threads, i);
     }
 
     while (true) {
-        int cl = accept(sock, NULL, NULL);
-        if (cl < 0) { err(EXIT_FAILURE, "error connecting to client\n"); }
+        if((client_socket = accept(sock, NULL, NULL)) < 0) {
+            warn_exit("error connecting to client\n");
+        }
 
-        sem_wait(&sem);
-        pthread_mutex_lock(&lock);
         int target_thread = dequeue(available_threads);
-        workers[target_thread].cl = cl;
-        pthread_cond_signal(&workers[target_thread].condition_var);
-        pthread_mutex_unlock(&lock);
+        workers[target_thread].cl = client_socket;
+        sem_post(&workers[target_thread].sem);
     }
 
     return EXIT_SUCCESS;
