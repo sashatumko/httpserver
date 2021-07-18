@@ -1,4 +1,5 @@
 #include "queue.h"
+#include "util.h"
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -17,8 +18,6 @@
 #include <semaphore.h>
 #include <limits.h>
 #include <netdb.h>
-#define BUFFER_SIZE 4096
-#define MAX_HEADER_SIZE 4096
 
 sem_t sem; // sem for putting dispatcher to sleep
 bool verbose = false;
@@ -65,20 +64,7 @@ static void send_body(ssize_t cl, struct http_object* message) {
     return;
 }
 
-// checks if filename is valid (according to class specs)
-static bool valid_filename(char* s) {
-    if(s[27] != '\0') return false;
-    for(int i = 0; i < (int)(strlen(s)); i++) {
-        if(!((s[i] == '-') || (s[i] == '.')
-            || (s[i] == '_')
-            || (s[i] >= '0' && s[i] <= '9')
-            || (s[i] >= 'A' && s[i] <= 'Z')
-            || (s[i] >= 'a' && s[i] <= 'z'))) {
-            return false;
-        }
-    }
-    return true;
-}
+
 
 // sets http_object fields to 0 or null
 static void initialize(struct http_object* message) {
@@ -331,7 +317,7 @@ static void process_request(ssize_t cl, struct http_object* message) {
 // construct response
 static void construct_http_response(ssize_t cl, struct http_object* message) {
 
-    char status_message[20];
+    char status_message[30];
     switch (message->status_code) {
         case 200:
             strcpy(status_message, "OK");
@@ -414,62 +400,83 @@ void* handle_request(void* thread) {
     }
 }
 
+// return -1 if error, else 1-64
+int get_nthreads_arg(char *optarg) {
+
+    if(optarg == NULL) return -1;
+    if(strlen(optarg) == 0 || strlen(optarg) > 2) return -1;
+
+    int nthreads = 0;
+    for(size_t i = 0; i < strlen(optarg); ++i) {
+        if(optarg[i] < '0' || optarg[i] > '9') return -1;
+        nthreads = (nthreads * 10) + (optarg[i] - '0');
+    }
+
+    if(nthreads == 0 || nthreads > MAX_THREADS) return -1;
+    return nthreads;
+}
+
 int main(int argc, char** argv) {
 
-    char *PORT_NUMBER;        // port number (from args)
-    char *SERVER_NAME_STRING; // hostname (from args)
-    int NUM_THREADS = 4;      // number of threads. Defaults 4
+    char *port;        // port number (from args)
+    char *hostname; // hostname (from args)
+    int nthreads = 4;      // number of threads. Defaults 4
+    
     int c = 0;
     opterr = 0;
+    
     while ((c = getopt(argc, argv, "N:v")) != -1) {
         switch (c) {
         case 'N':
-            NUM_THREADS = atoi(optarg);
+            if ((nthreads = get_nthreads_arg(optarg)) == -1) {
+                fprintf(stderr, "invalid thread arg\n");
+            }
             break;
         case 'v':
             verbose = true;
             break;
         default:
-            fprintf(stderr, "usage: ./httpserver <hostname:port> [-N num_threads] [-v verbose]\n");
+            fprintf(stderr, "usage: ./httpserver <hostname:port> [-N nthreads] [-v verbose]\n");
             return EXIT_FAILURE;
         }
     }
+
     int index = optind;
-    if (index >= argc || NUM_THREADS > 100 || NUM_THREADS <= 0) {
-        fprintf(stderr, "usage: ./httpserver <hostname:port> [-N num_threads] [-v verbose]\n");
+    if (index >= argc || nthreads > 64 || nthreads <= 0) {
+        fprintf(stderr, "usage: ./httpserver <hostname:port> [-N nthreads] [-v verbose]\n");
         return EXIT_FAILURE;
     } else {
         for (index = optind; index < argc; index++) {
             char *token = strtok(argv[index], ":");
             if (token == NULL) {
-                fprintf(stderr, "usage: ./httpserver <hostname:port> [-N num_threads] [-v verbose]\n");
+                fprintf(stderr, "usage: ./httpserver <hostname:port> [-N nthreads] [-v verbose]\n");
                 return EXIT_FAILURE;
             }
-            SERVER_NAME_STRING = token;
+            hostname = token;
             token = strtok(NULL, ":");
             if (token == NULL) {
-                fprintf(stderr, "usage: ./httpserver <hostname:port> [-N num_threads] [-v verbose]\n");
+                fprintf(stderr, "usage: ./httpserver <hostname:port> [-N nthreads] [-v verbose]\n");
                 return EXIT_FAILURE;
             }
-            PORT_NUMBER = token;
-            int PORT_NUMBER_len = (int)strlen(PORT_NUMBER);
-            for (int i = 0; i < PORT_NUMBER_len; i++) {
-                if (PORT_NUMBER[i] < '0' || PORT_NUMBER[i] > '9') {
-                    fprintf(stderr, "usage: ./httpserver <hostname:port> [-N num_threads] [-v verbose]\n");
+            port = token;
+            int port_len = (int)strlen(port);
+            for (int i = 0; i < port_len; i++) {
+                if (port[i] < '0' || port[i] > '9') {
+                    fprintf(stderr, "usage: ./httpserver <hostname:port> [-N nthreads] [-v verbose]\n");
                     return EXIT_FAILURE;
                 }
             }
         }
     }
 
-    struct hostent *hent = gethostbyname(SERVER_NAME_STRING);
+    struct hostent *hent = gethostbyname(hostname);
     if (hent == NULL) {
         fprintf(stderr, "Error: gethostbyname failed.\n");
         return EXIT_FAILURE;
     }
     struct sockaddr_in addr;
     memcpy(&addr.sin_addr.s_addr, hent->h_addr, hent->h_length);
-    addr.sin_port = htons(atoi(PORT_NUMBER));
+    addr.sin_port = htons(atoi(port));
     addr.sin_family = AF_INET;
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     int enable = 1;
@@ -477,18 +484,19 @@ int main(int argc, char** argv) {
     bind(sock, (struct sockaddr *)&addr, sizeof(addr));
     listen(sock, 128);
 
-    struct worker *workers = (worker *)malloc(NUM_THREADS * sizeof(worker));
+    struct worker *workers = malloc(nthreads * sizeof(struct worker));
     queue available_threads = new_queue();
-    sem_init(&sem, 0, NUM_THREADS);
+    sem_init(&sem, 0, nthreads);
     pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
-    printf("Starting httpserver... (threads: %d)\n", NUM_THREADS);
+    printf("Starting httpserver... (threads: %d)\n", nthreads);
 
     // initializes threads
-    for(int i = 0; i < NUM_THREADS; i++) {
+    for(int i = 0; i < nthreads; i++) {
         workers[i].cl = INT_MIN;
         workers[i].id = i;
-        workers[i].condition_var = PTHREAD_COND_INITIALIZER;
+        int ret = pthread_cond_init(&workers[i].condition_var, NULL);
+        if(ret != 0) warn("wtf"); // debug
         workers[i].lock = &lock;
         workers[i].available_threads = available_threads;
         

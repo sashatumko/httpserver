@@ -1,29 +1,26 @@
-TARGET=httpserver
-SOURCES=$(TARGET).cpp queue.cpp
-CXXFLAGS=-std=gnu++11 -g -Wall -Wextra -Wpedantic -Wshadow -pthread -O2
-OBJECTS=$(SOURCES:.cpp=.o)
-DEPS=$(SOURCES:.cpp=.d)
-INCLUDES = queue.h
+EXECBIN  = httpserver
+SOURCES  = $(EXECBIN).c queue.c util.c
+OBJECTS  = $(SOURCES:.c=.o)
+CFLAGS   = -Wall -Wextra -Wpedantic -Wshadow -O2 -pthread
+CC       = gcc
+INCLUDES = queue.h util.h
 
-CXX=clang++
+all: $(EXECBIN)
 
-all: $(TARGET)
+$(EXECBIN): $(OBJECTS)
+	$(CC) $(CFLAGS) $(OBJECTS) -o $@
 
-clean:
-	-rm $(DEPS) $(OBJECTS)
-
-spotless: clean
-	-rm $(TARGET)
+%.o : %.c
+	$(CC) $(CFLAGS) -c $<
 
 format:
-	clang-format -i $(SOURCES) $(INCLUDES)
+	clang-format -i $(SOURCES)
 
-$(TARGET): $(OBJECTS)
-	$(CXX) $(CXXFLAGS) -o $@ $(OBJECTS)
+clean:
+	-rm -rf $(OBJECTS)
 
--include $(DEPS)
+spotless: clean
+	-rm -rf $(EXECBIN)
 
-.PHONY: all clean format spotless
 
-memcheck :
-	valgrind --leak-check=full ./rpcserver localhost:8912
+
