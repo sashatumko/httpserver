@@ -17,3 +17,20 @@ int valid_filename(char* s) {
     }
     return 1;
 }
+
+// fix
+// returns port number or -1
+int valid_port(char *p) {
+    size_t port_len = strlen(p);
+    for (size_t i = 0; i < port_len; i++) {
+        if (p[i] < '0' || p[i] > '9') {
+            return -1;
+        }
+    }
+    return atoi(p);
+}
+
+void warn_exit(char *msg) {
+    fprintf(stderr, "%s", msg);
+    exit(EXIT_FAILURE);
+}

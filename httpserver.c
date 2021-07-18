@@ -418,65 +418,60 @@ int get_nthreads_arg(char *optarg) {
 
 int main(int argc, char** argv) {
 
-    char *port;        // port number (from args)
-    char *hostname; // hostname (from args)
-    int nthreads = 4;      // number of threads. Defaults 4
+    int port = 8080;        // port number (from args)
+    char *hostname = "localhost"; // hostname (from args)
+    int8_t nthreads = 4;      // number of threads. Defaults 4
     
     int c = 0;
     opterr = 0;
     
+    // parse flags
     while ((c = getopt(argc, argv, "N:v")) != -1) {
         switch (c) {
-        case 'N':
-            if ((nthreads = get_nthreads_arg(optarg)) == -1) {
-                fprintf(stderr, "invalid thread arg\n");
-            }
-            break;
-        case 'v':
-            verbose = true;
-            break;
-        default:
-            fprintf(stderr, "usage: ./httpserver <hostname:port> [-N nthreads] [-v verbose]\n");
-            return EXIT_FAILURE;
-        }
-    }
-
-    int index = optind;
-    if (index >= argc || nthreads > 64 || nthreads <= 0) {
-        fprintf(stderr, "usage: ./httpserver <hostname:port> [-N nthreads] [-v verbose]\n");
-        return EXIT_FAILURE;
-    } else {
-        for (index = optind; index < argc; index++) {
-            char *token = strtok(argv[index], ":");
-            if (token == NULL) {
-                fprintf(stderr, "usage: ./httpserver <hostname:port> [-N nthreads] [-v verbose]\n");
-                return EXIT_FAILURE;
-            }
-            hostname = token;
-            token = strtok(NULL, ":");
-            if (token == NULL) {
-                fprintf(stderr, "usage: ./httpserver <hostname:port> [-N nthreads] [-v verbose]\n");
-                return EXIT_FAILURE;
-            }
-            port = token;
-            int port_len = (int)strlen(port);
-            for (int i = 0; i < port_len; i++) {
-                if (port[i] < '0' || port[i] > '9') {
-                    fprintf(stderr, "usage: ./httpserver <hostname:port> [-N nthreads] [-v verbose]\n");
-                    return EXIT_FAILURE;
+            case 'N': {
+                if ((nthreads = get_nthreads_arg(optarg)) == -1) {
+                    warn_exit("error: invalid thread arg\n");
                 }
+                break;
+            }
+            case 'v': {
+                verbose = true;
+                break;
+            }
+            default: {
+                warn_exit(USAGE_MSG);
+                return 0;
             }
         }
     }
 
+    // parse hostname and port
+    if (optind < argc) {
+        for (int index = optind; index < argc; index++) {
+            
+            char *token = strtok(argv[index], ":");
+            
+            if ((hostname = token) == NULL) {
+                warn_exit(USAGE_MSG);
+            }
+            if ((token = strtok(NULL, ":")) == NULL) {
+                warn_exit(USAGE_MSG);
+            }
+            if ((port = valid_port(token)) == -1) {
+                warn_exit(USAGE_MSG);
+            }
+        }
+    }
+
+    // resolve hostname
     struct hostent *hent = gethostbyname(hostname);
     if (hent == NULL) {
-        fprintf(stderr, "Error: gethostbyname failed.\n");
-        return EXIT_FAILURE;
+        warn_exit("error: gethostbyname failed.\n");
     }
+
     struct sockaddr_in addr;
     memcpy(&addr.sin_addr.s_addr, hent->h_addr, hent->h_length);
-    addr.sin_port = htons(atoi(port));
+    addr.sin_port = htons(port);
     addr.sin_family = AF_INET;
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     int enable = 1;
@@ -485,11 +480,11 @@ int main(int argc, char** argv) {
     listen(sock, 128);
 
     struct worker *workers = malloc(nthreads * sizeof(struct worker));
-    queue available_threads = new_queue();
+    queue available_threads = new_queue(nthreads);
     sem_init(&sem, 0, nthreads);
     pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
-    printf("Starting httpserver... (threads: %d)\n", nthreads);
+    printf("Starting httpserver... [host: %s port: %d threads: %d]\n", hostname, port, nthreads);
 
     // initializes threads
     for(int i = 0; i < nthreads; i++) {

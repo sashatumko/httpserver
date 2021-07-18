@@ -2,6 +2,8 @@
 #include <err.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <pthread.h>
+#include <semaphore.h>
 
 /* private node type */
 
@@ -33,19 +35,23 @@ void free_node(node *n) {
 typedef struct queue_t {
   node front;
   node back;
-  int size;
+  size_t size;
+  size_t nthreads;
+  sem_t sem; // sem for blocking threads
 } queue_t;
 
 // constructor 
-queue new_queue() {
+queue new_queue(size_t n) {
   queue q = malloc(sizeof(queue_t));
   q->front = q->back = NULL;
   q->size = 0;
+  q->nthreads = n;
+  sem_init(&q->sem, 0, n);
   return q;
 }
 
 // returns number of queued up elements
-int size(queue q) { 
+size_t size(queue q) { 
 
   if (q == NULL) {
     warn("queue: bad pointer");

@@ -1,6 +1,6 @@
 #ifndef _QUEUE_H_INCLUDE_
 #define _QUEUE_H_INCLUDE_
-// #include <stdint.h>
+#include <stdlib.h>
 
 /*
     QUEUE ADT
@@ -16,7 +16,7 @@ queue new_queue();
 void free_queue(queue *Q);
 
 // size of queue
-int size(queue Q);
+size_t size(queue Q);
 
 // check if empty queue 
 int is_empty(queue Q);
