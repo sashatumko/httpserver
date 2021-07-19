@@ -213,7 +213,7 @@ static void http_put(struct http_object* msg) {
     } else if(S_ISDIR(fileStat.st_mode)) {
         http_error_reply(msg, 400); // file is a dir
         return;
-    } if(!(fileStat.st_mode & S_IWUSR)) {
+    } else if(!(fileStat.st_mode & S_IWUSR)) {
         http_error_reply(msg, 403); // file does not have write perms
         return;
     } else {
