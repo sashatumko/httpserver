@@ -47,7 +47,7 @@ queue new_queue(size_t n) {
   q->front = q->back = NULL;
   q->size = 0;
   q->nthreads = n;
-  sem_init(&q->sem, 0, n);
+  sem_init(&q->sem, 0, 0);
   pthread_mutex_init(&q->mtx, NULL);
   return q;
 }

@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <err.h>
+#include <errno.h>
 
 // checks if filename is valid (according to class specs)
 int valid_filename(char* s) {
@@ -31,7 +33,11 @@ int valid_port(char *p) {
 }
 
 void warn_exit(char *msg) {
-    fprintf(stderr, "%s", msg);
+    if(errno != 0) {
+        warn("[%s]", msg);
+    } else {
+        fprintf(stderr, "%s", msg);
+    }
     exit(EXIT_FAILURE);
 }
 

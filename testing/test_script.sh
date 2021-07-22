@@ -190,23 +190,6 @@ test_seven() {
   check_test
 }
 
-# GET, HEAD, PUT a file with name that is not one of the valid 27 characters (bad request)
-test_eight() {
-  print_banner "Test 8: ${test_str[8]}"
-  start_server
-  touch aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa t82.mp3 t83.txt
-  echo 'hello' > t84
-  ( curl -s http://localhost:8080/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --write-out "%{http_code}" > test81-server.out & \
-  curl -s -I http://localhost:8080/t82.mp3 --write-out "%{http_code}" > test82-server.out & \
-  curl -s -T t84 http://localhost:8080/t83.txt --write-out "%{http_code}" > test83-server.out & \
-  wait)
-  kill_server
-  grep -q "400" test81-server.out && \
-  grep -q "400" test82-server.out && \
-  grep -q "400" test83-server.out
-  check_test
-}
-
 # GET request, small file, with netcat
 test_nine() {
   print_banner "Test 9: ${test_str[9]}"
@@ -385,9 +368,10 @@ test_sixteen() {
 # GET request with one of the irrevelent headers messed up (400)
 test_seventeen() {
   print_banner "Test 17: ${test_str[17]}"
-  start_server
+  ./httpserver localhost:8080 -v &
+  sleep 0.5
 
-  printf """HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n""" > expected13
+  printf """HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n""" > expected13
   {
   printf """GET /FILE666 HTTP/1.1\r\nHost: localhost:8080\r\nthisisbad\r\n\r\n""";
   } | nc localhost 8080 > FILE667
@@ -521,7 +505,6 @@ case $TEST in
     test_five
     test_six
     test_seven
-    test_eight
     test_nine
     test_ten
     test_eleven
@@ -540,7 +523,7 @@ case $TEST in
     fat_test
     ;;
   2)
-    test_four
+    test_seventeen
     ;;
   3)
     test_fourteen
